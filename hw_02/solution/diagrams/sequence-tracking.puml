@@ -1,0 +1,30 @@
+@startuml sequence-tracking
+title Живой трекинг — WSS на краю, gRPC stream внутри
+skinparam sequenceMessageAlign center
+
+actor Courier as CR
+actor Client as CL
+participant "BFF" as BFF
+participant "Tracking" as TR
+database "Redis\ngeo · pub/sub" as RD
+participant "Geo\nHTTPS REST" as GEO
+
+CL -> BFF: WSS /v1/orders/{id}/track
+BFF -> TR: gRPC stream Subscribe(order_id)
+
+loop каждые 3–5 с
+  CR -> BFF: HTTPS REST\nPUT /v1/courier/location
+  BFF -> TR: gRPC ReportLocation
+  TR -> RD: GEOADD + PUBLISH
+end
+
+RD -> TR: pub/sub
+TR --> BFF: stream LocationUpdated
+BFF --> CL: WSS JSON {lat, lon, eta}
+
+opt пересчёт ETA (не на каждую точку)
+  TR -> GEO: HTTPS REST route/eta
+  GEO --> TR: duration
+end
+
+@enduml

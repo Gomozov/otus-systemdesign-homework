@@ -1,0 +1,21 @@
+@startuml sequence-kitchen-webhook
+title Статус кухни — webhook POS → шина → заказ
+skinparam sequenceMessageAlign center
+
+participant "POS / KDS" as POS
+participant "POS GW" as GW
+queue "Kafka" as KF
+participant "Orders" as ORD
+participant "Delivery" as DEL
+participant "Notify" as NTF
+database "PostgreSQL" as PG
+
+POS -> GW: HTTPS webhook\nkitchen.status
+GW -> GW: проверка подписи,\nидемпотентность
+GW -> KF: KitchenStatusChanged
+KF -> ORD: KitchenStatusChanged
+ORD -> PG: SQL UPDATE\ncooking / ready
+KF -> DEL: KitchenReady\n(старт матчинга, если ещё не начат)
+KF -> NTF: PUSH клиенту\n«заказ готов»
+
+@enduml

@@ -88,7 +88,7 @@
 - георезервирование
   > В т.ч. можно предусмотреть переброс нагрузки на соседние агломерации при пиках/перегрузке или авариях
 - не требуется CDN
-  > До 30k заведений × десятки позиций — это миллионы картинок, будут лежать в региональном object storage. Каталог регионален — картинки региональны, кросс-регионального трафика нет.
+  > До 30k заведений × десятки позиций - это миллионы картинок, будут лежать в региональном object storage. Каталог свой в каждой агломерации (регионе), кросс-регионального трафика картинок не требуется.
 - в каждом регионе можно интегрироваться со своим, региональным оператором связи, а не гонять трафик через шлюзы в масштабах страны
 
 Минусы:
@@ -168,9 +168,9 @@ SMS, Push-уведомления и Email-рассылки в мобильные
 
 #### Сервис синхронизации
 
-Другие агломерации — такие же стеки.
-Зачем: заказ, кухня, гео и локальная витрина живут в одном регионе (границы почти не пересекаются). Но пользователь и курьер могут появиться в другом городе, бренд сети общий, антифрод и ключи JWT должны совпадать везде. Также переброс нагрузки при аварии — без общей идентичности не сделать (это задел на будущее).
-Что не синхронизируем: заказы, трекинг, статусы кухни, региональный каталог и локальные промо. Их нет смысла передавать между регионами — это дешевле и проще держать на месте. Картинки тоже региональные, отдельный object storage не нужен.
+Другие агломерации - такие же стеки.
+Зачем: заказ, кухня, гео и локальная витрина живут в одном регионе (границы почти не пересекаются), но пользователь и курьер могут появиться в другом городе, бренд сети общий, антифрод и ключи JWT должны совпадать везде. Также переброс нагрузки при аварии - без общей идентичности не сделать (это задел на будущее).
+Что не синхронизируем: заказы, трекинг, статусы кухни, региональный каталог и локальные промо. Их нет смысла передавать между регионами - это дешевле и проще держать на месте. Картинки тоже региональные, отдельный object storage не нужен.
 
 ```mermaid
 flowchart TB
@@ -221,11 +221,14 @@ flowchart TB
 | Бренды/юрлица ресторанов/сетей | единый реестр | все регионы | часы |
 | Антифрод, чёрные списки | центр | все регионы | ≤ 1 мин |
 | Глобальные промо/бонусы | центр | все регионы | минуты |
-| Токены/сессии | — | stateless JWT, синк только публичных ключей (JWKS) | — |
+| Токены/сессии | - | stateless JWT, только публичные ключи (JWKS) | - |
 | Аналитика, ML-данные | все → центр | one-way поток в ClickHouse | асинхронно |
 | Платёжные транзакции и т.п. | не рассматриваем | | |
 
 ### C4
+
+> Возможно, т.к. узел в агломерации получается не супер нагруженным, некоторые сервисы можно объединить,
+> например: chat service + feedback service = support service
 
 ```mermaid
 %%{init: {"flowchart": {"defaultRenderer": "elk"}}}%%
@@ -330,7 +333,7 @@ flowchart TB
 
     %% Шина: потребители
     KAFKA -->|"заказы на матчинг"| DELIVERY
-    KAFKA -->|"статусы доставки"| ORDERS
+    KAFKA -->|"статусы доставки, кухни"| ORDERS
     KAFKA -->|"события · оффлайн-сообщения"| NOTIFY
 
     %% Домены → адаптеры
@@ -360,22 +363,403 @@ flowchart TB
     style EXT_NOTIF fill:#f5f5f5,stroke:#9e9e9e
 ```
 
+#### Authentication Service
+
+Аутентификация клиентов, ресторанов и курьеров, OTP, выпуск и отзыв JWT, обновление токенов.
+> OTP - one-time password, одноразовый код
+> JWT - JSON Web Token, подписанный токен, которым клиент доказывает, что он уже вошёл.
+
+#### Profile Service
+
+Источник информации о клиентах (покупателях): адреса доставки, привязанные платёжные методы, «домашний» регион пользователя, любимые блюда или продукты.
+
+#### Catalog Service
+
+Рестораны и зоны доставки, меню, цены, стоп-листы, промокоды. Один владелец витрины: `is_open`, `stop_list` и цена позиции живут здесь, не в заказе. Фото блюд — в object storage. На checkout отдаёт `ApplyPromo` и снимок позиций (`offer_id` → `price_minor`).
+
+#### Orders Service
+
+Жизненный цикл заказа и оркестрация checkout: проверка витрины, фиксация состава и сумм, создание платежа, смена статуса. Не считает тариф доставки, не матчит курьера, не звонит и не пишет в POS по своей инициативе из клиентского HTTP — после оплаты это события и адаптеры.
+
+#### Delivery Service
+
+Смены курьеров, геопоиск, офферы, назначение, отметки этапов (забрал / у клиента). Владеет тарифом доставки: на checkout BFF/Orders синхронно вызывает `QuoteFee` (дистанция, пик, тип смены). После `OrderPaid` / `KitchenReady` — хореография офферов.
+
+#### Tracking Service
+
+Точки курьера, Redis GEO, ETA, рассылка подписчикам. Не хранит заказ и не назначает курьера; читает `order_id` и пишет координаты.
+
+#### Support Service
+
+Треды клиент–курьер и клиент–поддержка, оценки, жалобы, тикеты, маскированные звонки через Telephony GW. Чат и фидбек в одном сервисе: один объект «обращение по заказу», без отдельной БД отзывов.
+
 ## 2. Протоколы
 
-_REST / gRPC / GraphQL / events — где и почему._
+На C4 протоколы указаны на стрелках.
+> BFF - Backend for Frontend
+> WSS - WebSocket поверх TLS
+> CDC - Change Data Capture, способ узнать, что в базе уже изменилось, не спрашивая приложение и не делая SELECT по всем таблицам. В PG через WAL.
+
+| Граница | Протокол | Почему |
+| --- | --- | --- |
+| Клиенты → BFF | HTTPS REST + WSS | Мобильные и web-клиенты, TLS, кэшируемые GET каталога, OpenAPI. WSS - трекинг и чат, без long polling. |
+| BFF → сервисы | gRPC | Типизированный контракт, codegen, один HTTP/2-коннект на вызов веера из BFF. На ~100-400 RPS заказов это не про пропускную способность, а про контракт и эволюцию API. |
+| BFF → Tracking | gRPC stream | Подписка клиента на заказ живёт минутами; стрим дешевле, чем опрос. |
+| BFF → Chat | WSS снаружи, gRPC внутри | Сокет держит BFF (переподключение, auth). Chat не знает про мобильный сокет. |
+| Сервисы → адаптеры (Pay/POS/Tel) | gRPC | Внутренний контракт. Снаружи у адаптера - то, что умеет партнёр. |
+| Адаптеры → платёжка, POS, телефония, гео | HTTPS REST + webhooks | Так устроены iiko/Syrve, эквайринг, маскированные звонки, картографические API. Свой gRPC туда не протащить. |
+| Сервисы → шина | Kafka (события) | Заказ затрагивает Delivery, Notify, POS. Не держим HTTP, пока курьер принимает оффер или кухня готовит. |
+| Notify → SMS / PUSH / почта | HTTPS / HTTP/2 / SMTP | Собственные протоколы шлюзов. FCM/APNs - HTTP/2. |
+| Сервисы → данные | SQL, RESP, S3 API | Собственные протоколы хранилищ, не «REST к своей БД». |
+| Регион ↔ хаб | CDC + события Kafka | См. сервис синхронизации. Не синхронный REST между агломерациями. |
+
+> Пик «~100 RPS на агломерацию» в разделе «Масштаб» - это оценка заказов. Просмотр витрины и трекинг курьеров могут дать другой порядок (наверное, что-то около х10).
 
 ## 3. Схема взаимодействия
 
-_PNG/PlantUML с указанием протоколов (в diagrams/)._
+| Сценарий | Файл |
+| --- | --- |
+| Создание заказа и оплата | [sequence-create-order.puml](diagrams/sequence-create-order.puml) · [PNG](diagrams/sequence-create-order.png) |
+| Вызов курьера | [sequence-delivery-match.puml](diagrams/sequence-delivery-match.puml) · [PNG](diagrams/sequence-delivery-match.png) |
+| Живой трекинг | [sequence-tracking.puml](diagrams/sequence-tracking.puml) · [PNG](diagrams/sequence-tracking.png) |
+| Статус кухни (webhook POS) | [sequence-kitchen-webhook.puml](diagrams/sequence-kitchen-webhook.puml) · [PNG](diagrams/sequence-kitchen-webhook.png) |
+
+### Создание заказа и оплата
+
+Клиент получает `201` сразу после создания платежа. Подтверждение оплаты, кухня и вызов курьера - после webhook, не в том же HTTP-запросе.
+
+![Создание заказа и оплата](diagrams/sequence-create-order.png)
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant BFF
+    participant Orders
+    participant Catalog
+    participant PayGW
+    participant POSGW
+    participant Kafka
+
+    Client->>BFF: HTTPS REST POST /v1/orders
+    BFF->>Orders: gRPC CreateOrder
+    Orders->>Catalog: gRPC ApplyPromo
+    Catalog-->>Orders: скидка / отказ
+    Orders->>PayGW: gRPC CreatePayment
+    PayGW-->>Orders: payment_url
+    Orders->>Kafka: OrderCreated
+    BFF-->>Client: 201 {order_id, payment_url}
+
+    Note over PayGW,Kafka: асинхронно
+    PayGW->>PayGW: HTTPS webhook payment.succeeded
+    PayGW->>Kafka: PaymentSucceeded
+    Kafka->>Orders: PaymentSucceeded
+    Orders->>POSGW: gRPC SubmitOrder
+    Orders->>Kafka: OrderPaid
+```
+
+### Выбор курьера
+
+Delivery service сам реагирует на `OrderPaid` / `KitchenReady`. Кто первый принял заказ - тот повёз. Orders узнаёт о назначении из Kafka, а не синхронным вызовом из Delivery.
+
+![Вызов курьера](diagrams/sequence-delivery-match.png)
+
+### Трекинг и статус кухни
+
+Клиент держит WSS. Курьер шлёт точку REST-ом раз в 3–5 с. BFF переводит это в gRPC; веер подписчикам - Redis pub/sub + gRPC stream. ETA у гео-сервиса считаем не на каждую точку.
+
+Webhook кухни: POS → POS GW (подпись, идемпотентность) → Kafka → Orders, Delivery, Notify.
+
+![Живой трекинг](diagrams/sequence-tracking.png)
+
+![Статус кухни](diagrams/sequence-kitchen-webhook.png)
 
 ## 4. API-контракты
 
-_3–4 ключевых API (Swagger/OpenAPI или описание)._
+Четыре контракта на границах, которые реально стыкуют контуры: витрина, заказ, оффер курьеру, входящий платёж. Внутри - тот же смысл в gRPC/protobuf; снаружи BFF отдаёт REST.
+
+### 4.1. Витрина - `GET /v1/restaurants`
+
+Кэшируемый GET.
+
+```yaml
+openapi: 3.0.3
+info:
+  title: Food Delivery BFF
+  version: 1.0.0
+paths:
+  /v1/restaurants:
+    get:
+      summary: Рестораны в радиусе доставки
+      parameters:
+        - in: query
+          name: lat
+          required: true
+          schema: { type: number, format: double }
+        - in: query
+          name: lon
+          required: true
+          schema: { type: number, format: double }
+        - in: query
+          name: radius_m
+          schema: { type: integer, default: 10000 }
+      responses:
+        "200":
+          description: Список заведений
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, eta_min, is_open]
+                      properties:
+                        id: { type: string, format: uuid }
+                        name: { type: string }
+                        eta_min: { type: integer }
+                        is_open: { type: boolean }
+                        stop_list: { type: boolean }
+  /v1/restaurants/{id}/menu:
+    get:
+      summary: Меню ресторана
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Категории и блюда
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  restaurant_id: { type: string, format: uuid }
+                  currency: { type: string, example: RUB }
+                  categories:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        items:
+                          type: array
+                          items:
+                            type: object
+                            required: [id, name, price_minor, available]
+                            properties:
+                              id: { type: string, format: uuid }
+                              name: { type: string }
+                              price_minor: { type: integer }
+                              available: { type: boolean }
+```
+
+BFF → Catalog/Partner: `GetNearbyRestaurants`, `GetMenu` (gRPC). Кэш Redis с ключом `menu:{restaurant_id}:{version}`.
+
+### 4.2. Заказ - `POST /v1/orders`
+
+Синхронный ответ - «заказ принят, оплатите». Кухня и курьер в этот ответ не входят.
+
+```yaml
+  /v1/orders:
+    post:
+      summary: Создать заказ
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [restaurant_id, address_id, items]
+              properties:
+                restaurant_id: { type: string, format: uuid }
+                address_id: { type: string, format: uuid }
+                promo_code: { type: string }
+                idempotency_key: { type: string, format: uuid }
+                items:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [offer_id, qty]
+                    properties:
+                      offer_id: { type: string, format: uuid }
+                      qty: { type: integer, minimum: 1 }
+      responses:
+        "201":
+          description: Заказ создан, ожидает оплату
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [order_id, status, payment]
+                properties:
+                  order_id: { type: string, format: uuid }
+                  status: { type: string, enum: [pending_payment] }
+                  payment:
+                    type: object
+                    properties:
+                      payment_id: { type: string }
+                      confirmation_url: { type: string, format: uri }
+        "409":
+          description: Промокод / стоп-лист / повтор idempotency_key
+        "422":
+          description: Ресторан закрыт или адрес вне зоны
+```
+
+Внутренний контракт (тот же сценарий):
+
+```protobuf
+service Orders {
+  rpc CreateOrder (CreateOrderRequest) returns (CreateOrderResponse);
+}
+
+message CreateOrderRequest {
+  string user_id = 1;
+  string restaurant_id = 2;
+  string address_id = 3;
+  string promo_code = 4;
+  string idempotency_key = 5;
+  repeated OrderItem items = 6;
+}
+
+message CreateOrderResponse {
+  string order_id = 1;
+  string status = 2;
+  string payment_id = 3;
+  string confirmation_url = 4;
+}
+```
+
+### 4.3. Оффер курьера - `POST /v1/courier/offers/{id}/accept`
+
+Гонка курьеров. Ответ сразу: принят или уже занят. Назначение другим сервисам уходит событием `CourierAssigned`.
+
+```yaml
+  /v1/courier/offers/{id}/accept:
+    post:
+      summary: Принять оффер на доставку
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Оффер закреплён за курьером
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [delivery_id, order_id, status]
+                properties:
+                  delivery_id: { type: string, format: uuid }
+                  order_id: { type: string, format: uuid }
+                  status: { type: string, enum: [assigned] }
+                  pickup:
+                    type: object
+                    properties:
+                      lat: { type: number }
+                      lon: { type: number }
+        "409":
+          description: Оффер уже принят другим курьером или отозван
+```
+
+### 4.4. Webhook оплаты - `POST /v1/internal/payments/webhook`
+
+Не публичный API приложения. Payment GW принимает колбэк провайдера, проверяет подпись, публикует `PaymentSucceeded` / `PaymentFailed`.
+
+```yaml
+  /v1/internal/payments/webhook:
+    post:
+      summary: Статус платежа от провайдера
+      parameters:
+        - in: header
+          name: X-Signature
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_id, payment_id, status]
+              properties:
+                event_id: { type: string }
+                payment_id: { type: string }
+                order_id: { type: string, format: uuid }
+                status: { type: string, enum: [succeeded, failed, refunded] }
+                amount_minor: { type: integer }
+      responses:
+        "200":
+          description: Принято (повтор с тем же event_id — тоже 200)
+        "401":
+          description: Подпись не сошлась
+```
+
+Аналогичный контракт у POS GW: `POST /v1/internal/pos/webhook` с `event_id`, `external_order_id`, `status: accepted | cooking | ready | rejected`.
+
+Трекинг для клиента - не REST-ресурс, а WSS `GET /v1/orders/{id}/track` → JSON-кадры `{ lat, lon, eta_min, ts }`. Внутри BFF: `rpc Subscribe(SubscribeRequest) returns (stream LocationUpdate)`.
 
 ## 5. Асинхронность
 
-_Где применяется и почему._
+Синхронно оставляем только то, без чего нельзя ответить клиенту в том же запросе. Всё, что ждёт человека, кухню или внешнего провайдера - в события и колбэки.
+
+| Место | Механизм | Почему не синхронно |
+| --- | --- | --- |
+| Подтверждение оплаты | webhook → Kafka `PaymentSucceeded` | 3-D Secure / СБП занимают секунды–минуты. HTTP создания заказа к этому моменту уже закрыт. |
+| Передача на кухню и статусы POS | gRPC SubmitOrder + webhook/Kafka | POS может быть недоступен; ретраи и повторная доставка статуса не должны блокировать клиента. |
+| Вызов курьера | Kafka + PUSH + accept | Оффер висит десятки секунд. Держать POST /orders открытым нельзя. |
+| SMS / PUSH / email | Kafka → Notify | Шлюзы медленные и с квотами. Отказ SMS не должен откатывать заказ. |
+| OTP при входе | Kafka `OtpRequested` → Notify | Auth отвечает «код отправлен»; доставка - отдельно. |
+| Трекинг | WSS + Redis pub/sub + gRPC stream | 20–30k курьеров на линии × точка каждые 3–5 с - это тысячи RPS. Писать каждую точку в PostgreSQL и отдавать поллингом некуда. |
+| Чат, если получатель офлайн | Kafka → Notify | Сообщение сохранено в PG; PUSH - лучший effort. |
+| Синхронизация регионов | CDC + хаб | Профиль в другом городе не обязан появиться в ту же миллисекунду. Антифрод - исключение (≤ 1 мин). |
+| Аналитика | one-way поток в центр | Не в критическом пути заказа. |
+
+Идемпотентность на входе в асинхронный контур: `idempotency_key` на создание заказа, `event_id` на webhooks, атомарный claim оффера в Redis (`SET NX` / Lua). Повтор webhook с тем же `event_id` - тот же `200`, без второго `SubmitOrder`.
+
+Что не делаем асинхронно: проверка промокода и стоп-листа в момент checkout (клиент должен сразу увидеть отказ), accept оффера (курьер должен сразу узнать, что заказ его).
 
 ## 6. Паттерны
 
-_Saga, CQRS и т.д. — обоснование._
+### API Gateway / BFF
+
+Одна точка входа для четырёх клиентов. Терминирует TLS, JWT, REST↔gRPC, WSS↔стрим. Клиенты не ходят в Orders/Delivery напрямую.
+
+### Saga (гибрид)
+
+Заказ задействует Orders, оплату, POS и Delivery. Распределённой транзакции (2PC) нет: платёжный сервис и POS вне нашей ответственности.
+
+- **Синхронная оркестрация в Orders** на checkout: промо → запись заказа → создание платежа. Orders знает шаги и может сразу вернуть ошибку клиенту.
+- **Хореография через Kafka** после оплаты: `PaymentSucceeded` → кухня; `KitchenReady` → вызов курьера; `CourierAssigned` → статус заказа и уведомления. Delivery владеет офферами, Orders - заказом. Центрального «saga orchestrator» нет: на пике обеда он стал бы точкой сериализации.
+
+Компенсации (тоже событиями, не 2PC):
+
+| Сбой | Компенсация |
+| --- | --- |
+| `PaymentFailed` | `OrderCancelled`, промокод освобождается |
+| Кухня `rejected` | отмена заказа, возврат через PayGW (детали финконтура за скобками) |
+| Нет курьера за N минут | повторный вызов / эскалация; при таймауте — отмена и возврат |
+| Курьер отменил после accept | новый оффер, заказ не отменяем сразу |
+
+Исходящие события Orders пишет через **transactional outbox**: в той же SQL-транзакции, что и `INSERT` заказа. Иначе «заказ в БД есть, `OrderCreated` потеряли» - вызов курьера не начнётся.
+
+### CQRS
+
+Полный CQRS с отдельной read-БД на 100 RPS заказов не нужен. PostgreSQL тянет витрину и заказы.
+
+Лёгкое разделение модели:
+
+- **Каталог.** Пишем в PostgreSQL (меню, цены, стоп-листы). Читаем из Redis. Это не две БД «команд и запросов», а кэш поверх write-модели.
+- **Трекинг.** Write: `ReportLocation` → Redis GEO. Read: стрим подписчикам. PostgreSQL здесь не участвует - другая модель и другой SLA.
+
+Event Sourcing для заказа не берём: нужен текущий статус и история переходов, не воспроизведение всех событий, чтобы узнать, где заказ. Журнал статусов в PG достаточнее.

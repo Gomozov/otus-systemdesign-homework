@@ -1,0 +1,26 @@
+@startuml sequence-delivery-match
+title Матчинг курьера — choreography через Kafka
+skinparam sequenceMessageAlign center
+
+actor Courier as CR
+participant "BFF\nREST · WSS" as BFF
+participant "Delivery\ngRPC" as DEL
+participant "Orders\ngRPC" as ORD
+participant "Notify" as NTF
+queue "Kafka" as KF
+database "Redis geo" as RD
+
+KF -> DEL: OrderPaid /\nKitchenReady
+DEL -> RD: GEOSEARCH курьеры\nв радиусе
+DEL -> KF: DeliveryOfferCreated
+KF -> NTF: оффер
+NTF -> CR: HTTP/2 PUSH
+
+CR -> BFF: HTTPS REST\nPOST /v1/courier/offers/{id}/accept
+BFF -> DEL: gRPC AcceptOffer
+DEL -> RD: атомарный claim\n(SET NX / Lua)
+DEL -> KF: CourierAssigned
+KF -> ORD: CourierAssigned
+KF -> NTF: клиенту и ресторану
+
+@enduml

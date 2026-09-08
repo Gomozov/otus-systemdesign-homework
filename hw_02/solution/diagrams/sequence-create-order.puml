@@ -1,0 +1,35 @@
+@startuml sequence-create-order
+title Создание заказа и оплата — протоколы на стрелках
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+actor Client as C
+participant "BFF\nREST · WSS" as BFF
+participant "Orders\ngRPC" as ORD
+participant "Catalog\ngRPC" as CAT
+participant "Payment GW\ngRPC" as PAY
+participant "POS GW\ngRPC" as POS
+queue "Kafka" as KF
+database "PostgreSQL" as PG
+
+C -> BFF: HTTPS REST\nPOST /v1/orders
+BFF -> ORD: gRPC CreateOrder
+ORD -> CAT: gRPC ApplyPromo
+CAT --> ORD: скидка / отказ
+ORD -> PG: SQL INSERT order\n(status=pending_payment)
+ORD -> PAY: gRPC CreatePayment
+PAY --> ORD: payment_url, payment_id
+ORD -> KF: OrderCreated
+ORD --> BFF: order_id, payment_url
+BFF --> C: 201 Created
+
+== асинхронно: подтверждение оплаты ==
+PAY <-] : HTTPS webhook\npayment.succeeded
+PAY -> KF: PaymentSucceeded
+KF -> ORD: PaymentSucceeded
+ORD -> PG: SQL UPDATE\nstatus=paid
+ORD -> POS: gRPC SubmitOrder
+POS --> ORD: accepted
+ORD -> KF: OrderPaid\nKitchenSubmitted
+
+@enduml
