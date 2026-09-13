@@ -190,7 +190,7 @@ flowchart TB
 
     SYNC["Sync Service<br/>фильтрация, версионирование"]
     HUB{{"Глобальный хаб"}}
-    AW["Интейк webhooks<br/>платежного сервиса"]
+    AW["Webhooks<br/>платежного сервиса"]
     AN["Analytics Service"]
     CH[("ClickHouse<br/>события, метрики")]
 
@@ -206,9 +206,11 @@ flowchart TB
 
     style SYNC fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px
     style HUB fill:#e3f2fd,stroke:#1e88e5
-    style AW fill:#f5f5f5,stroke:#9e9e9e
+    style AW fill:#f5f5f5,stroke:#9e9e9e,stroke-dasharray: 8 6
     style CH fill:#ede7f6,stroke:#9575cd
 ```
+
+> Webhook платежного сервиса это опциональная сущность для поддержки единой точки входа банков, как альтернатива региональным (своим для каждой агломерации), чтобы не создавать много PaymentGW.
 
 | Данные | Владелец (кто пишет) | Куда реплицируется | Свежесть |
 | --- | --- | --- | --- |
@@ -402,7 +404,7 @@ flowchart TB
 | Сервисы → адаптеры (Pay/POS/Tel) | gRPC | Внутренний контракт. Снаружи у адаптера - то, что умеет партнёр. |
 | Адаптеры → платёжка, POS, телефония, гео | HTTPS REST + webhooks | Так устроены iiko/Syrve, эквайринг, маскированные звонки, картографические API. Свой gRPC туда не протащить. |
 | Сервисы → шина | Kafka (события) | Заказ затрагивает Delivery, Notify, POS. Не держим HTTP, пока курьер принимает оффер или кухня готовит. |
-| Notify → SMS / PUSH / почта | HTTPS / HTTP/2 / SMTP | Собственные протоколы шлюзов. FCM/APNs - HTTP/2. |
+| Notify → SMS / PUSH / почта | HTTPS / HTTP/2 / SMTP | Собственные протоколы шлюзов. FCM (пуш на Android, Google) или APNs (Apple Push Notification service) - HTTP/2. |
 | Сервисы → данные | SQL, RESP, S3 API | Собственные протоколы хранилищ, не «REST к своей БД». |
 | Регион ↔ хаб | CDC + события Kafka | См. сервис синхронизации. Не синхронный REST между агломерациями. |
 
@@ -422,33 +424,6 @@ flowchart TB
 Клиент получает `201` сразу после создания платежа. Подтверждение оплаты, кухня и вызов курьера - после webhook, не в том же HTTP-запросе.
 
 ![Создание заказа и оплата](diagrams/sequence-create-order.png)
-
-```mermaid
-sequenceDiagram
-    actor Client
-    participant BFF
-    participant Orders
-    participant Catalog
-    participant PayGW
-    participant POSGW
-    participant Kafka
-
-    Client->>BFF: HTTPS REST POST /v1/orders
-    BFF->>Orders: gRPC CreateOrder
-    Orders->>Catalog: gRPC ApplyPromo
-    Catalog-->>Orders: скидка / отказ
-    Orders->>PayGW: gRPC CreatePayment
-    PayGW-->>Orders: payment_url
-    Orders->>Kafka: OrderCreated
-    BFF-->>Client: 201 {order_id, payment_url}
-
-    Note over PayGW,Kafka: асинхронно
-    PayGW->>PayGW: HTTPS webhook payment.succeeded
-    PayGW->>Kafka: PaymentSucceeded
-    Kafka->>Orders: PaymentSucceeded
-    Orders->>POSGW: gRPC SubmitOrder
-    Orders->>Kafka: OrderPaid
-```
 
 ### Выбор курьера
 
@@ -708,17 +683,17 @@ message CreateOrderResponse {
 
 | Место | Механизм | Почему не синхронно |
 | --- | --- | --- |
-| Подтверждение оплаты | webhook → Kafka `PaymentSucceeded` | 3-D Secure / СБП занимают секунды–минуты. HTTP создания заказа к этому моменту уже закрыт. |
+| Подтверждение оплаты | webhook → Kafka | 3-D Secure / СБП занимают секунды–минуты. HTTP создания заказа к этому моменту уже закрыт. |
 | Передача на кухню и статусы POS | gRPC SubmitOrder + webhook/Kafka | POS может быть недоступен; ретраи и повторная доставка статуса не должны блокировать клиента. |
 | Вызов курьера | Kafka + PUSH + accept | Оффер висит десятки секунд. Держать POST /orders открытым нельзя. |
 | SMS / PUSH / email | Kafka → Notify | Шлюзы медленные и с квотами. Отказ SMS не должен откатывать заказ. |
-| OTP при входе | Kafka `OtpRequested` → Notify | Auth отвечает «код отправлен»; доставка - отдельно. |
-| Трекинг | WSS + Redis pub/sub + gRPC stream | 20–30k курьеров на линии × точка каждые 3–5 с - это тысячи RPS. Писать каждую точку в PostgreSQL и отдавать поллингом некуда. |
-| Чат Support, если получатель офлайн | Kafka → Notify | Сообщение сохранено в PG (тред обращения); PUSH - лучший effort. |
+| OTP при входе | Kafka → Notify | Auth отвечает «код отправлен»; доставка - отдельно. |
+| Трекинг | WSS + Redis pub/sub + gRPC stream | 20–30k курьеров на линии × точка каждые 3–5 с - это тысячи RPS. Писать каждую точку в PostgreSQL (INSERT или UPDATE) не имеет смысла, лучше координата курьера в REDIS с TTL. |
+| Чат Support, если получатель офлайн | Kafka → Notify | Сообщение сохранено в PG (тред обращения); PUSH — необязательная часть: попытались разбудить телефон, если нет, то пользователь увидит когда зайдет в чат. |
 | Синхронизация регионов | CDC + хаб | Профиль в другом городе не обязан появиться в ту же миллисекунду. Антифрод - исключение (≤ 1 мин). |
 | Аналитика | one-way поток в центр | Не в критическом пути заказа. |
 
-Идемпотентность на входе в асинхронный контур: `idempotency_key` на создание заказа, `event_id` на webhooks, атомарный claim оффера в Redis (`SET NX` / Lua). Повтор webhook с тем же `event_id` - тот же `200`, без второго `SubmitOrder`.
+Идемпотентность на входе в асинхронный контур: `idempotency_key` на создание заказа, `event_id` на webhooks, атомарная процедура приема оффера в Redis (`SET NX` / Lua). Повтор webhook с тем же `event_id` - тот же `200`, без второго `SubmitOrder`.
 
 Что не делаем асинхронно: проверка промокода и стоп-листа в момент checkout (клиент должен сразу увидеть отказ), accept оффера (курьер должен сразу узнать, что заказ его).
 
