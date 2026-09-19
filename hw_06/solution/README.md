@@ -139,17 +139,119 @@ flowchart BT
 | Пользователь → Мессенджер | HTTPS | Логин, REST: профиль, контакты, поиск, инвайты, загрузка медиа | Запросы с ответом и идемпотентностью; TLS обязателен. Сессии с нескольких устройств - обычные HTTP-запросы с токеном |
 | Пользователь ↔ Мессенджер | WSS (WebSocket поверх TLS) | Сообщения, статусы, реакции, presence, WS ping каждые 15 с | Долгий канал для push-in-app и heartbeat. Не HTTP-polling: иначе получатся десятки тысяч RPS на 1 млн online |
 | Оператор → Мессенджер | HTTPS (отдельный ingress) | Админка и мониторинг | Тот же TLS, другая точка входа и IAM, чтобы админка не торчала на пользовательском API |
-| Мессенджер → Почтовый сервис | SMTP или HTTPS API | Письма подтверждения email / восстановления | Вход по email. SMTP - классика (свой MTA); HTTPS. |
+| Мессенджер → Почтовый сервис | SMTP или HTTPS API | Письма подтверждения email / восстановления | Вход по email. SMTP (свой MTA); HTTPS. |
 | Мессенджер → FCM | HTTPS (REST JSON) | Офлайн-push для Android | FCM HTTP v1: POST https://fcm.googleapis.com/.../messages:send, OAuth. Версия HTTP не фиксирована, достаточно обычного HTTPS |
 | Мессенджер → APNs | HTTP/2 (+ TLS 1.2+) | Офлайн-push для iOS | Контракт Apple: только HTTP/2, streams, POST /3/device/{token}. HTTP/1.1 не принимают. Это тоже TLS :443, но версия протокола обязательна |
 | Мессенджер → Web Push | HTTPS + VAPID | Офлайн-push в браузер | RFC 8030/8292: POST на endpoint браузера, идентификация сервера ключами VAPID. Без живого WSS вкладка сама не узнает о сообщении |
 | FCM / APNs / Web Push → устройство | протокол вендора | Системное уведомление | Последняя миля вне nF3 и вне нашего SLA. На устройстве это не «наш» HTTPS |
 
-- Схема C4: Context + Container (в diagrams/).
-- Описание компонентов (1–2 предложения на каждый).
-- Обоснование архитектурного стиля.
-- ADR для 2–3 ключевых решений.
-- Пользователи и внешние интеграции.
+### C4
+
+```mermaid
+flowchart TB
+  user["Пользователь"]
+  ops["Оператор платформы"]
+
+  subgraph sys["Мессенджер"]
+    clients["Клиенты<br/>Android / iOS / Web"]
+    gw["API Gateway"]
+    auth["Authentication Service<br/>+ Auth DB"]
+    presence["Presence Service<br/>+ Redis"]
+    contact["Contact Service<br/>+ DB"]
+    msgSvc["Message Service<br/>+ DB"]
+    obj[("Object storage<br/>горячее")]
+    cold[("Object storage<br/>холодное / архив")]
+    push["Push Service"]
+    smtp["SMTP Service"]
+    maint["Maintenance Service<br/>+ DB"]
+  end
+
+  mail["Почтовый сервис"]
+  vendors["FCM / APNs / Web Push"]
+
+  user -->|"открывает приложение"| clients
+  user -->|"WSS heartbeat 15 с"| presence
+  clients -->|"HTTPS, WSS"| gw
+  ops -->|"HTTPS admin"| maint
+
+  gw -->|"HTTP, сессия"| auth
+  gw -->|"HTTP"| contact
+  gw -->|"HTTP"| msgSvc
+  gw -->|"HTTP, last-seen"| presence
+  gw <-->|"события в WSS"| msgSvc
+
+  msgSvc -->|"состав группы, инвайт"| contact
+  msgSvc -->|"HTTPS PUT"| obj
+  clients -->|"HTTPS GET"| obj
+  obj -->|"lifecycle"| cold
+  cold -->|"HTTPS GET / restore"| obj
+  msgSvc -->|"офлайн-доставка"| push
+
+  auth -->|"HTTP"| smtp
+  smtp -->|"SMTP / HTTPS"| mail
+  push -->|"HTTPS / HTTP/2 / VAPID"| vendors
+  vendors -->|"push"| user
+
+  classDef external stroke-dasharray: 5 5
+  class mail,vendors external
+```
+
+| Связь | Подпись на схеме | Протокол целиком |
+| ----- | ---------------- | ---------------- |
+| Клиенты → Gateway | HTTPS+WSS | HTTPS + WSS; WS ping 15 с только до Gateway |
+| Оператор → Maintenance | HTTPS | HTTPS, отдельный вход в систему (ingress) |
+| Gateway → Auth / Contact / Message / Presence | HTTP | внутренний HTTP; в Presence — last-seen, не каждый ping |
+| Gateway ↔ Message | WSS | события рассылки в уже открытые сокеты |
+| Message → Contact | HTTP | состав группы, инвайт |
+| Message → object storage | PUT | HTTPS PUT (S3 API) |
+| Клиенты → object storage | GET | HTTPS GET |
+| горячее → холодное | lifecycle | политика бакета, не поток Message |
+| холодное → горячее | GET | HTTPS GET / restore |
+| Message → Push | HTTP | офлайн-доставка |
+| Auth → SMTP | HTTP | внутренний адаптер |
+| SMTP → почта | SMTP | SMTP или HTTPS API провайдера |
+| Push → вендоры | HTTPS | FCM: HTTPS REST; APNs: HTTP/2; Web Push: HTTPS + VAPID |
+| Вендоры → пользователь | push | протокол вендора |
+
+### 2.3 Описание компонентов
+
+#### 2.3.1 API Gateway
+
+Единая точка входа для всех клиентских запросов. Принимает клиентский HTTPS и WSS, проверяет сессию через **Authentication Service**, маршрутизирует в сервисы. Долгие сокеты и heartbeat (каждые 15 с) заканчиваются здесь. Админский HTTPS идёт в Maintenance отдельно.
+
+#### 2.3.2 Authentication Service + Auth DB
+
+Сервис аутентификации пользователей со своей отдельной базой данных. Поддерживает до 10 сессий на каждого пользователя. Вход по email, письма через **SMTP Service**.
+
+#### 2.3.3 Presence Service + Redis
+
+Сервис присутствия хранит online/offline устройств в Redis по факту WSS heartbeat с Gateway. Нет ping 120 с - статус устаревает. Сам на устройства ничего не рассылает.
+
+#### 2.3.4 Message Service + DB + Object storage + Холодное хранилище
+
+Принимает, хранит и отвечает за рассылку сообщений (диалог и группа ≤256): история, статусы, реакции, edit/delete/reply/пересылка. Текст и метаданные — в своей БД, файлы до 100 МБ — в object storage.
+
+#### 2.3.5 Contact Service + DB
+
+Каталог пользователей, книга контактов (до 5000), блокировки, поиск; метаданные групп и членство, инвайты только от админа группы.
+
+#### 2.3.6 Push Service
+
+Сервис взаимодействия со службами Apple и Google для отправки PUSH-уведомлений. Также поддерживает отправку уведомлений для web. Обработка mute.
+
+#### 2.3.7 Maintenance Service + DB
+
+Сервис поддержки функций администрирования и мониторинга. Админ-API и аудит; метрики — отдельный контур.
+
+#### 2.3.8 SMTP Service
+
+Внутренний адаптер для взаимодействия с почтовыми серверами.
+
+### 2.4 Обоснование архитектурного стиля
+
+### 2.5 ADR
+
+### 2.6 Пользователи и внешние интеграции
 
 ## 3. Сайзинг
 
