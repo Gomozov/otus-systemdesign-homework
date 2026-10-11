@@ -96,13 +96,14 @@ flowchart TB
     %% Шина: потребители
     KAFKA -->|"заказы на матчинг"| DELIVERY
     KAFKA -->|"статусы доставки, кухни"| ORDERS
+    KAFKA -->|"OrderPaid · кухня"| POSGW
     KAFKA -->|"события · оффлайн-сообщения"| NOTIFY
 
     %% Домены → адаптеры
     ORDERS -->|"создать платеж · gRPC"| PAYGW
-    ORDERS -->|"передать заказ · gRPC"| POSGW
     SUPPORT -->|"инициировать звонок · gRPC"| TELGW
-    ORDERS -->|"промокод, бонусы · gRPC"| CATALOG
+    ORDERS -->|"ValidateAndQuote · gRPC"| CATALOG
+    ORDERS -->|"QuoteFee · gRPC"| DELIVERY
 
     %% Адаптеры → внешние сервисы
     PAYGW -->|"HTTPS REST + webhooks"| PAY

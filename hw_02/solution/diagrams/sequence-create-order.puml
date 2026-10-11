@@ -1,5 +1,5 @@
 @startuml sequence-create-order
-title Создание заказа и оплата — протоколы на стрелках
+title Создание заказа и оплата - протоколы на стрелках
 skinparam sequenceMessageAlign center
 skinparam responseMessageBelowArrow true
 
@@ -7,29 +7,44 @@ actor Client as C
 participant "BFF\nREST · WSS" as BFF
 participant "Orders\ngRPC" as ORD
 participant "Catalog\ngRPC" as CAT
+participant "Delivery\ngRPC" as DEL
 participant "Payment GW\ngRPC" as PAY
-participant "POS GW\ngRPC" as POS
+participant "POS GW" as POS
 queue "Kafka" as KF
 database "PostgreSQL" as PG
 
 C -> BFF: HTTPS REST\nPOST /v1/orders
 BFF -> ORD: gRPC CreateOrder
-ORD -> CAT: gRPC ApplyPromo
-CAT --> ORD: скидка / отказ
-ORD -> PG: SQL INSERT order\n(status=pending_payment)
-ORD -> PAY: gRPC CreatePayment
-PAY --> ORD: payment_url, payment_id
-ORD -> KF: OrderCreated
-ORD --> BFF: order_id, payment_url
-BFF --> C: 201 Created
 
-== асинхронно: подтверждение оплаты ==
-PAY <-] : HTTPS webhook\npayment.succeeded
-PAY -> KF: PaymentSucceeded
+par до INSERT
+  ORD -> CAT: gRPC ValidateAndQuote\n(items, promo, idempotency_key)
+  CAT --> ORD: is_open, стоп-лист,\nснимок цен, резерв промо (TTL)
+else
+  ORD -> DEL: gRPC QuoteFee
+  DEL --> ORD: delivery_fee_minor
+end
+
+alt витрина, промо или зона не прошли
+  ORD --> BFF: отказ
+  BFF --> C: 409 стоп-лист / промо\n422 закрыт / вне зоны
+else суммы зафиксированы
+  ORD -> PG: SQL INSERT order + outbox\n(одна транзакция,\nstatus=pending_payment)
+  PG -> KF: CDC relay\nOrderCreated
+  ORD -> PAY: gRPC CreatePayment\n(идемпотентно)
+  PAY --> ORD: payment_url, payment_id
+  ORD --> BFF: order_id, payment_url,\ntotal_minor
+  BFF --> C: 201 Created
+end
+
+== асинхронно: оплата и кухня ==
+PAY <-] : HTTPS webhook\nнапрямую в Payment GW
+PAY -> KF: PaymentSucceeded\n(дедуп по event_id)
 KF -> ORD: PaymentSucceeded
-ORD -> PG: SQL UPDATE\nstatus=paid
-ORD -> POS: gRPC SubmitOrder
-POS --> ORD: accepted
-ORD -> KF: OrderPaid\nKitchenSubmitted
+ORD -> PG: SQL UPDATE status=paid\n+ outbox OrderPaid\n+ processed_events(event_id)
+PG -> KF: CDC relay\nOrderPaid
+KF -> POS: OrderPaid
+POS -> POS: backoff, retry, DLQ
+POS ->] : HTTPS SubmitOrder
+POS -> KF: KitchenSubmitted\n/ KitchenRejected
 
 @enduml
