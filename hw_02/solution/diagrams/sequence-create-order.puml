@@ -17,10 +17,10 @@ C -> BFF: HTTPS REST\nPOST /v1/orders
 BFF -> ORD: gRPC CreateOrder
 
 par до INSERT
-  ORD -> CAT: gRPC ValidateAndQuote\n(items, promo, idempotency_key)
-  CAT --> ORD: is_open, стоп-лист,\nснимок цен, резерв промо (TTL)
+  ORD -> CAT: gRPC ValidateAndQuote\n(address, items, promo, idempotency_key)
+  CAT --> ORD: is_open, адрес, стоп-лист,\nснимок цен, резерв промо (TTL)
 else
-  ORD -> DEL: gRPC QuoteFee
+  ORD -> DEL: gRPC QuoteFee\n(restaurant, address)
   DEL --> ORD: delivery_fee_minor
 end
 
