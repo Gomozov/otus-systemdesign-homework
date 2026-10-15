@@ -11,13 +11,13 @@ flowchart TB
     subgraph STACK[" "]
     direction TB
 
-    subgraph CORE["Сервис доставки еды — один регион (тиражируется на каждую агломерацию)"]
+    subgraph CORE["Сервис доставки еды - один регион (тиражируется на каждую агломерацию)"]
 
         BFF["API Gateway / BFF<br/>REST · WebSocket"]
 
         subgraph DOMAIN["Доменные сервисы"]
             AUTH["Authentication Service<br/>JWT, OTP, токены"]
-            PROFILE["Profile Service<br/>профили, адреса, платёжные методы"]
+            PROFILE["Profile Service<br/>профили, адреса, платежные методы"]
             CATALOG["Catalog Service<br/>рестораны, меню, зоны, промо"]
             ORDERS["Orders Service<br/>заказы, платежи, статусы"]
             DELIVERY["Delivery Service<br/>смены, матчинг, офферы"]
@@ -26,7 +26,7 @@ flowchart TB
         end
 
         subgraph DATA["Данные"]
-            PG[("PostgreSQL — транзакционные БД<br/>orders · catalog · profiles · promotions · couriers · deliveries · support")]
+            PG[("PostgreSQL - транзакционные БД<br/>orders · catalog · profiles · promotions · couriers · deliveries · support")]
             AUTHDB[("PostgreSQL<br/>аккаунты, refresh-токены")]
             REDIS[("Redis<br/>кэш · гео · корзины · OTP · чат fan-out")]
             S3[("Object Storage<br/>фото блюд, вложения чатов")]
@@ -68,7 +68,7 @@ flowchart TB
     BFF -->|"профиль, адреса · gRPC"| PROFILE
     BFF -->|"витрина, меню · gRPC"| CATALOG
     BFF -->|"gRPC"| ORDERS
-    BFF -->|"чат, оценки · WS/gRPC"| SUPPORT
+    BFF -->|"чат, оценки · gRPC + stream"| SUPPORT
     BFF -->|"отметки этапов · gRPC"| DELIVERY
     BFF -->|"gRPC stream"| TRACKING
 
@@ -96,13 +96,14 @@ flowchart TB
     %% Шина: потребители
     KAFKA -->|"заказы на матчинг"| DELIVERY
     KAFKA -->|"статусы доставки, кухни"| ORDERS
+    KAFKA -->|"OrderPaid · кухня"| POSGW
     KAFKA -->|"события · оффлайн-сообщения"| NOTIFY
 
     %% Домены → адаптеры
     ORDERS -->|"создать платеж · gRPC"| PAYGW
-    ORDERS -->|"передать заказ · gRPC"| POSGW
     SUPPORT -->|"инициировать звонок · gRPC"| TELGW
-    ORDERS -->|"промокод, бонусы · gRPC"| CATALOG
+    ORDERS -->|"ValidateAndQuote · gRPC"| CATALOG
+    ORDERS -->|"QuoteFee · gRPC"| DELIVERY
 
     %% Адаптеры → внешние сервисы
     PAYGW -->|"HTTPS REST + webhooks"| PAY

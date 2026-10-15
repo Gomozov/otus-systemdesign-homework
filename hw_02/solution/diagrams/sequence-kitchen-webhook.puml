@@ -1,5 +1,5 @@
 @startuml sequence-kitchen-webhook
-title Статус кухни — webhook POS → шина → заказ
+title Статус кухни - webhook POS → шина → заказ
 skinparam sequenceMessageAlign center
 
 participant "POS / KDS" as POS
@@ -14,8 +14,8 @@ POS -> GW: HTTPS webhook\nkitchen.status
 GW -> GW: проверка подписи,\nидемпотентность
 GW -> KF: KitchenStatusChanged
 KF -> ORD: KitchenStatusChanged
-ORD -> PG: SQL UPDATE\ncooking / ready
-KF -> DEL: KitchenReady\n(старт матчинга, если ещё не начат)
+ORD -> PG: SQL UPDATE cooking / ready\n+ processed_events(event_id)
+KF -> DEL: KitchenReady\nwaiting_kitchen → offering
 KF -> NTF: PUSH клиенту\n«заказ готов»
 
 @enduml

@@ -1,5 +1,5 @@
 @startuml sequence-delivery-match
-title Матчинг курьера — choreography через Kafka
+title Матчинг курьера - одна доставка на заказ
 skinparam sequenceMessageAlign center
 
 actor Courier as CR
@@ -8,18 +8,37 @@ participant "Delivery\ngRPC" as DEL
 participant "Orders\ngRPC" as ORD
 participant "Notify" as NTF
 queue "Kafka" as KF
+database "PostgreSQL" as PG
 database "Redis geo" as RD
 
-KF -> DEL: OrderPaid /\nKitchenReady
+== OrderPaid: строка доставки, без офферов ==
+KF -> DEL: OrderPaid
+DEL -> PG: INSERT delivery\nstatus=waiting_kitchen\nуникальность по order_id
+
+== KitchenReady: единственный старт матчинга ==
+KF -> DEL: KitchenReady
+DEL -> PG: UPDATE status=offering\nWHERE status=waiting_kitchen
+note right of DEL
+  0 строк: OrderPaid ещё не создал
+  доставку (ретрай) или офферы
+  уже идут (повтор события)
+end note
 DEL -> RD: GEOSEARCH курьеры\nв радиусе
-DEL -> KF: DeliveryOfferCreated
+DEL -> PG: офферы + outbox\nDeliveryOfferCreated
+PG -> KF: CDC relay
 KF -> NTF: оффер
 NTF -> CR: HTTP/2 PUSH
 
+== accept: решение в PostgreSQL ==
 CR -> BFF: HTTPS REST\nPOST /v1/courier/offers/{id}/accept
 BFF -> DEL: gRPC AcceptOffer
-DEL -> RD: атомарный claim\n(SET NX / Lua)
-DEL -> KF: CourierAssigned
+DEL -> PG: UPDATE courier_id,\nstatus=assigned + outbox\nWHERE status=offered
+note right of DEL
+  0 строк → 409
+  Redis - GEOSEARCH
+  и кэш офферов
+end note
+PG -> KF: CDC relay\nCourierAssigned
 KF -> ORD: CourierAssigned
 KF -> NTF: клиенту и ресторану
 
