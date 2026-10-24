@@ -1,5 +1,5 @@
 @startuml sequence-tracking
-title Живой трекинг — WSS на краю, gRPC stream внутри
+title Живой трекинг - WSS на краю, gRPC stream внутри
 skinparam sequenceMessageAlign center
 
 actor Courier as CR
@@ -13,7 +13,7 @@ CL -> BFF: WSS /v1/orders/{id}/track
 BFF -> TR: gRPC stream Subscribe(order_id)
 
 loop каждые 3–5 с
-  CR -> BFF: HTTPS REST\nPUT /v1/courier/location
+  CR -> BFF: WSS кадр\nlocation {lat, lon}
   BFF -> TR: gRPC ReportLocation
   TR -> RD: GEOADD + PUBLISH
 end
